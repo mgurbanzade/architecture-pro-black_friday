@@ -1,0 +1,103 @@
+name: mongo-sharding
+
+# Задание 2. Шардирование MongoDB:
+#   1 сервер конфигурации (configSrv), 2 шарда (shard1, shard2), 1 роутер (mongos_router).
+#   Приложение ходит в MongoDB только через роутер.
+
+x-mongo-healthcheck: &mongo-healthcheck
+  interval: 5s
+  timeout: 5s
+  retries: 30
+  start_period: 10s
+
+services:
+  # Сервер конфигурации: хранит метаданные кластера (какие чанки на каком шарде)
+  configSrv:
+    image: mongo:8.0
+    container_name: configSrv
+    restart: always
+    command: ["--configsvr", "--replSet", "config_server", "--bind_ip_all", "--port", "27017"]
+    volumes:
+      - config-data:/data/db
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD", "mongosh", "--port", "27017", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      <<: *mongo-healthcheck
+
+  # Шард 1
+  shard1:
+    image: mongo:8.0
+    container_name: shard1
+    restart: always
+    command: ["--shardsvr", "--replSet", "shard1", "--bind_ip_all", "--port", "27018"]
+    volumes:
+      - shard1-data:/data/db
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD", "mongosh", "--port", "27018", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      <<: *mongo-healthcheck
+
+  # Шард 2
+  shard2:
+    image: mongo:8.0
+    container_name: shard2
+    restart: always
+    command: ["--shardsvr", "--replSet", "shard2", "--bind_ip_all", "--port", "27019"]
+    volumes:
+      - shard2-data:/data/db
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD", "mongosh", "--port", "27019", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      <<: *mongo-healthcheck
+
+  # Роутер: определяет, на какой шард отправить запрос
+  mongos_router:
+    image: mongo:8.0
+    container_name: mongos_router
+    restart: always
+    command: ["mongos", "--configdb", "config_server/configSrv:27017", "--bind_ip_all", "--port", "27020"]
+    ports:
+      - "27020:27020"
+    depends_on:
+      configSrv:
+        condition: service_healthy
+      shard1:
+        condition: service_healthy
+      shard2:
+        condition: service_healthy
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD", "mongosh", "--port", "27020", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      <<: *mongo-healthcheck
+
+  pymongo_api:
+    image: kazhem/pymongo_api:1.0.0
+    # образ собран только под amd64; на Apple Silicon запускается через эмуляцию
+    platform: linux/amd64
+    container_name: pymongo_api
+    restart: always
+    # mongos становится healthy только после инициализации кластера (scripts/mongo-init.sh),
+    # поэтому ждём только старта контейнера: драйвер сам переподключится
+    depends_on:
+      mongos_router:
+        condition: service_started
+    ports:
+      - "8080:8080"
+    environment:
+      MONGODB_URL: "mongodb://mongos_router:27020"
+      MONGODB_DATABASE_NAME: "somedb"
+    networks:
+      - app-network
+
+networks:
+  app-network:
+    driver: bridge
+
+volumes:
+  config-data:
+  shard1-data:
+  shard2-data:
